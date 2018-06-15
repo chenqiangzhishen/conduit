@@ -14,6 +14,7 @@ use super::{
     untrusted,
     webpki,
 };
+use telemetry::sensor;
 
 use futures::{future, stream, Future, Stream};
 use futures_watch::Watch;
@@ -88,8 +89,11 @@ impl CommonSettings {
     /// The returned stream consists of each subsequent successfully loaded
     /// `CommonSettings` after each change. If the settings could not be
     /// reloaded (i.e., they were malformed), nothing is sent.
-    fn stream_changes(self, interval: Duration)
-        -> impl Stream<Item = CommonConfig, Error = ()>
+    fn stream_changes(
+        self,
+        interval: Duration,
+        mut sensor: sensor::TlsConfig,
+    ) -> impl Stream<Item = CommonConfig, Error = ()>
     {
         let paths = self.paths().iter()
             .map(|&p| p.clone())
@@ -99,9 +103,17 @@ impl CommonSettings {
         stream::once(Ok(()))
             .chain(::fs_watch::stream_changes(paths, interval))
             .filter_map(move |_| {
-                CommonConfig::load_from_disk(&self)
-                    .map_err(|e| warn!("error reloading TLS config: {:?}, falling back", e))
-                    .ok()
+                match CommonConfig::load_from_disk(&self) {
+                    Err(e) => {
+                        warn!("error reloading TLS config: {:?}, falling back", e);
+                        sensor.failed(e);
+                        None
+                    },
+                    Ok(cfg) => {
+                        sensor.reloaded();
+                        Some(cfg)
+                    }
+                }
             })
     }
 
@@ -181,7 +193,10 @@ impl CommonConfig {
 
 }
 
-pub fn watch_for_config_changes(settings: Option<&CommonSettings>)
+pub fn watch_for_config_changes(
+    settings: Option<&CommonSettings>,
+    sensor: sensor::TlsConfig,
+)
     -> (ClientConfigWatch, ServerConfigWatch, Box<Future<Item = (), Error = ()> + Send>)
 {
     let settings = if let Some(settings) = settings {
@@ -193,7 +208,7 @@ pub fn watch_for_config_changes(settings: Option<&CommonSettings>)
         return (client_watch, server_watch, Box::new(no_future));
     };
 
-    let changes = settings.stream_changes(Duration::from_secs(1));
+    let changes = settings.stream_changes(Duration::from_secs(1), sensor);
     let (client_watch, client_store) = Watch::new(None);
     let (server_watch, server_store) = Watch::new(None);
 

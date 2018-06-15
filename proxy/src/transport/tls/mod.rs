@@ -11,7 +11,13 @@ mod dns_name;
 mod identity;
 
 pub use self::{
-    config::{CommonSettings, ServerConfig, ServerConfigWatch, watch_for_config_changes},
+    config::{
+        CommonSettings,
+        Error as ConfigError,
+        ServerConfig,
+        ServerConfigWatch,
+        watch_for_config_changes,
+    },
     connection::Connection,
     dns_name::{DnsName, InvalidDnsName},
     identity::Identity,

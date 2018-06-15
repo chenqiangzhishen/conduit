@@ -238,7 +238,10 @@ where
         let bind = Bind::new().with_sensors(sensors.clone());
 
         let (_tls_client_config, tls_server_config, tls_cfg_bg) =
-            tls::watch_for_config_changes(config.tls_settings.as_ref());
+            tls::watch_for_config_changes(
+                config.tls_settings.as_ref(),
+                sensors.tls_config(),
+            );
 
         // Setup the public listener. This will listen on a publicly accessible
         // address and listen for inbound connections that should be forwarded

@@ -27,4 +27,5 @@ pub use self::{
     connection::{Connection, Session, UpgradeClientToTls},
     dns_name::{DnsName, InvalidDnsName},
     identity::Identity,
+    rustls::TLSError as Error,
 };

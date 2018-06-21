@@ -78,7 +78,7 @@ pub type ServerConfigWatch = Watch<Option<ServerConfig>>;
 /// The configuration in effect for a client (`ClientConfig`) or server
 /// (`ServerConfig`) TLS connection.
 #[derive(Clone, Debug)]
-pub struct ConnectionConfig<C> where C: Clone + std::fmt::Debug {
+pub struct ConnectionConfig<C> where C: Clone {
     pub identity: Identity,
     pub config: C,
 }
@@ -94,6 +94,9 @@ pub enum ReasonForNoTls {
     /// The endpoint's TLS identity is unknown. Without knowing its identity
     /// we can't validate its certificate.
     NoIdentity(ReasonForNoIdentity),
+
+    /// The connection is between the proxy and the service
+    InternalTraffic,
 
     /// We fell back to plaintext because the TLS handshake failed.
     // TODO: Perhaps this should store some more detailed information on
@@ -118,6 +121,14 @@ pub enum ReasonForNoIdentity {
     /// We haven't implemented the mechanism to construct a TLS identity for
     /// the controller yet.
     NotImplementedForController,
+
+    /// We haven't implemented the mechanism to construct a TLs identity for
+    /// the tap psuedo-service yet.
+    NotImplementedForTap,
+
+    /// We haven't implemented the mechanism to construct a TLs identity for
+    /// the metrics psuedo-service yet.
+    NotImplementedForMetrics,
 }
 
 impl From<ReasonForNoIdentity> for ReasonForNoTls {
@@ -243,15 +254,27 @@ impl CommonConfig {
 
 }
 
-pub fn watch_for_config_changes(settings: Option<&CommonSettings>)
-    -> (ClientConfigWatch, ServerConfigWatch, Box<Future<Item = (), Error = ()> + Send>)
+// A Future that, when polled, checks for config updates and publishes them.
+pub type PublishConfigs = Box<Future<Item = (), Error = ()> + Send>;
+
+/// Returns Client and Server config watches, and a task to drive updates.
+///
+/// The returned task Future is expected to never complete.
+///
+/// If there are no TLS settings, then empty watches are returned. In this case, the
+/// Future is never notified.
+///
+/// If all references are dropped to _either_ the client or server config watches, all
+/// updates will cease for both config watches.
+pub fn watch_for_config_changes(settings: Conditional<&CommonSettings, ReasonForNoTls>)
+    -> (ClientConfigWatch, ServerConfigWatch, PublishConfigs)
 {
-    let settings = if let Some(settings) = settings {
+    let settings = if let Conditional::Some(settings) = settings {
         settings.clone()
     } else {
         let (client_watch, _) = Watch::new(None);
         let (server_watch, _) = Watch::new(None);
-        let no_future = future::ok(());
+        let no_future = future::empty();
         return (client_watch, server_watch, Box::new(no_future));
     };
 
@@ -276,8 +299,8 @@ pub fn watch_for_config_changes(settings: Option<&CommonSettings>)
                 Ok((client_store, server_store))
             })
         .then(|_| {
-            trace!("forwarding to server config watch finished.");
-            Ok(())
+            error!("forwarding to tls config watches finished.");
+            Err(())
         });
 
     // This function and `ServerConfig::no_tls` return `Box<Future<...>>`
@@ -345,7 +368,7 @@ impl ServerConfig {
 }
 
 pub fn current_connection_config<C>(watch: &ConditionalConnectionConfig<Watch<Option<C>>>)
-    -> ConditionalConnectionConfig<C> where C: Clone + std::fmt::Debug
+    -> ConditionalConnectionConfig<C> where C: Clone
 {
     match watch {
         Conditional::Some(c) => {

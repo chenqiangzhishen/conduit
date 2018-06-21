@@ -384,6 +384,7 @@ impl fmt::Display for ctx::transport::TlsStatus {
             Conditional::None(tls::ReasonForNoTls::HandshakeFailed) =>
                 f.pad("tls=\"handshake_failed\""),
             Conditional::None(tls::ReasonForNoTls::Disabled) |
+            Conditional::None(tls::ReasonForNoTls::InternalTraffic) |
             Conditional::None(tls::ReasonForNoTls::NoIdentity(_)) => Ok(()),
         }
     }

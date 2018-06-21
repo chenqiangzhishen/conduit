@@ -13,7 +13,7 @@ use tokio::{
 use conditional::Conditional;
 use ctx::transport::TlsStatus;
 use config::Addr;
-use transport::{GetOriginalDst, Io, tls};
+use transport::{AddrInfo, BoxedIo, GetOriginalDst, tls};
 
 pub struct BoundPort {
     inner: std::net::TcpListener,
@@ -57,7 +57,7 @@ enum ConnectingState {
 /// subverted.
 #[derive(Debug)]
 pub struct Connection {
-    io: Box<Io>,
+    io: BoxedIo,
     /// This buffer gets filled up when "peeking" bytes on this Connection.
     ///
     /// This is used instead of MSG_PEEK in order to support TLS streams.
@@ -121,7 +121,7 @@ impl BoundPort {
     // TLS when needed.
     pub fn listen_and_fold<T, F, Fut>(
         self,
-        tls: Option<(tls::Identity, tls::ServerConfigWatch)>,
+        tls: tls::ConditionalConnectionConfig<tls::ServerConfigWatch>,
         initial: T,
         f: F)
         -> impl Future<Item = (), Error = io::Error> + Send + 'static
@@ -143,6 +143,7 @@ impl BoundPort {
                 .and_then(move |socket| {
                     let remote_addr = socket.peer_addr()
                         .expect("couldn't get remote addr!");
+
                     // TODO: On Linux and most other platforms it would be better
                     // to set the `TCP_NODELAY` option on the bound socket and
                     // then have the listening sockets inherit it. However, that
@@ -150,25 +151,23 @@ impl BoundPort {
                     // libraries don't have the necessary API for that, so just
                     // do it here.
                     set_nodelay_or_warn(&socket);
-                    let why_no_tls = if let Some((_identity, config_watch)) = &tls {
-                        // TODO: use `identity` to differentiate between TLS
-                        // that the proxy should terminate vs. TLS that should
-                        // be passed through.
-                        if let Some(config) = &*config_watch.borrow() {
-                            let f = tls::Connection::accept(socket, config.clone())
-                                .map(move |tls| {
-                                    (Connection::tls(tls), remote_addr)
-                                });
-                            return Either::A(f);
-                        } else {
-                            // No valid TLS configuration.
-                            tls::ReasonForNoTls::NoConfig
-                        }
-                    } else {
-                        tls::ReasonForNoTls::Disabled
+
+                    let conn = match tls::current_connection_config(&tls) {
+                        Conditional::Some(config) => {
+                            // TODO: use `config.identity` to differentiate
+                            // between TLS that the proxy should terminate vs.
+                            // TLS that should be passed through.
+                            let f = tls::Connection::accept(socket, config.config)
+                                .map(move |tls| Connection::tls(tls));
+                            Either::A(f)
+                        },
+                        Conditional::None(why_no_tls) => {
+                            let f = future::ok(socket)
+                                .map(move |plain| Connection::plain(plain, why_no_tls));
+                            Either::B(f)
+                        },
                     };
-                    let conn = Connection::plain(socket, why_no_tls);
-                    Either::B(future::ok((conn, remote_addr)))
+                    conn.map(move |conn| (conn, remote_addr))
                 })
                 .then(|r| {
                     future::ok(match r {
@@ -246,7 +245,7 @@ impl Future for Connecting {
 impl Connection {
     fn plain(io: TcpStream, why_no_tls: tls::ReasonForNoTls) -> Self {
         Connection {
-            io: Box::new(io),
+            io: BoxedIo::new(io),
             peek_buf: BytesMut::new(),
             tls_status: Conditional::None(why_no_tls),
         }
@@ -254,7 +253,7 @@ impl Connection {
 
     fn tls<S: tls::Session + std::fmt::Debug + 'static>(tls: tls::Connection<S>) -> Self {
         Connection {
-            io: Box::new(tls),
+            io: BoxedIo::new(tls),
             peek_buf: BytesMut::new(),
             tls_status: Conditional::Some(()),
         }
